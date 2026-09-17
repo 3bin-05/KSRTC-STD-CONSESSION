@@ -69,6 +69,25 @@ export function DataProvider({ children }) {
     return saved ? JSON.parse(saved) : []
   })
 
+  // Helper to merge remote + local by id, preferring the freshest (by history length / timestamps)
+  const mergeByIdPreferFresh = (prev, remote, getFreshness) => {
+    const map = new Map()
+    // Seed with remote first
+    remote.forEach(doc => map.set(doc.id, doc))
+    prev.forEach(localDoc => {
+      const existing = map.get(localDoc.id)
+      if (!existing) {
+        map.set(localDoc.id, localDoc)
+      } else {
+        // Both have same id — keep the fresher
+        const aFresh = getFreshness(existing)
+        const bFresh = getFreshness(localDoc)
+        if (bFresh > aFresh) map.set(localDoc.id, localDoc)
+      }
+    })
+    return Array.from(map.values())
+  }
+
   // Live Firestore Real-Time Subscriptions when Firebase is configured
   useEffect(() => {
     if (!isConfigured || !db) return
@@ -76,28 +95,23 @@ export function DataProvider({ children }) {
     const unsubscribes = []
 
     try {
-      // 1. Applications Listener
+      // 1. Applications Listener — merges remote + local, keeps optimistic local updates until confirmed
       const unsubApps = onSnapshot(collection(db, 'applications'), (snapshot) => {
-        if (!snapshot.empty) {
-          const remoteApps = snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }))
-          setApplications(prev => {
-            const combined = [...remoteApps]
-            // Keep any local demo items not yet in remote if needed
-            prev.forEach(p => {
-              if (!combined.some(c => c.id === p.id)) combined.push(p)
-            })
-            return combined
-          })
-        }
+        const remoteApps = snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }))
+        if (snapshot.empty && remoteApps.length === 0) return
+        setApplications(prev => mergeByIdPreferFresh(prev, remoteApps, (doc) => {
+          const hLen = Array.isArray(doc.history) ? doc.history.length : 0
+          const t = new Date(doc.adminApprovedAt || doc.institutionApprovedAt || doc.submittedAt || 0).getTime()
+          return hLen * 1e13 + t
+        }))
       }, (err) => console.warn('Firestore Applications sync note:', err.message))
       unsubscribes.push(unsubApps)
 
-      // 2. Passes Listener
+      // 2. Passes Listener — merges like applications so optimistic local passes aren't clobbered by stale snapshot
       const unsubPasses = onSnapshot(collection(db, 'passes'), (snapshot) => {
-        if (!snapshot.empty) {
-          const remotePasses = snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }))
-          setPasses(remotePasses)
-        }
+        const remotePasses = snapshot.docs.map(docSnap => ({ id: docSnap.id, ...docSnap.data() }))
+        if (snapshot.empty && remotePasses.length === 0) return
+        setPasses(prev => mergeByIdPreferFresh(prev, remotePasses, (doc) => new Date(doc.createdAt || 0).getTime()))
       }, (err) => console.warn('Firestore Passes sync note:', err.message))
       unsubscribes.push(unsubPasses)
 

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Html5Qrcode } from 'html5-qrcode'
-import { verifyPassQR, generateStudentQRData } from '../../lib/crypto'
+import { verifyPassQR, generateStudentQRData, signPassPayload } from '../../lib/crypto'
 import { useAuth } from '../../context/AuthContext'
 import { useData } from '../../context/DataContext'
 import {
@@ -186,8 +186,15 @@ export default function ConductorApp() {
     ? trips.filter(t => t.studentId === scannedPayload.studentId || (scannedPayload.passId && t.passId === scannedPayload.passId))
     : []
 
-  const todayStr = new Date().toISOString().split('T')[0]
-  const todayTrips = scannedPassStudentTrips.filter(t => t.timestamp && t.timestamp.startsWith(todayStr))
+  // IST day — must match StudentPortal and computeDailyCode
+  const getISTToday = () => {
+    try { return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) } catch (_e) { return new Date().toISOString().split('T')[0] }
+  }
+  const todayStr = getISTToday()
+  const todayTrips = scannedPassStudentTrips.filter(t => {
+    if (!t.timestamp) return false
+    try { return new Date(t.timestamp).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) === todayStr } catch (_e) { return t.timestamp.startsWith(todayStr) }
+  })
   const todayUsedKm = todayTrips.reduce((sum, t) => sum + (Number(t.distanceKm) || 0), 0)
   const distanceLimit = scannedPayload?.distanceLimitKm || 30
   const remainingKm = Math.max(0, distanceLimit - todayUsedKm)
@@ -220,11 +227,39 @@ export default function ConductorApp() {
     setTripLogged(true)
   }
 
-  // Simulators
+  // Simulators — always produce a verifiable QR even if passes is empty (for offline demo)
   const testValidPass = () => {
-    const validPass = passes[0]
-    if (validPass) handleScanSuccess(generateStudentQRData(validPass))
-    else alert('No active issued pass found. Approve an application in Admin portal first!')
+    let validPass = passes[0]
+    if (!validPass) {
+      try {
+        const saved = localStorage.getItem('anavandi_passes')
+        const arr = saved ? JSON.parse(saved) : []
+        validPass = arr[0]
+      } catch (_e) {}
+    }
+    if (validPass) {
+      handleScanSuccess(generateStudentQRData(validPass))
+      return
+    }
+    // Still nothing — synthesize a correctly signed demo pass on the fly so the crypto path can be tested without Firebase
+    const mockPayload = {
+      passId: 'PAS-TEST01',
+      studentId: 'student-demo-uid',
+      name: 'Arun Kumar (Demo Valid)',
+      photoUrl: 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=200&auto=format&fit=crop&q=80',
+      rollNo: 'B21CS104',
+      institutionName: 'Government Engineering College Barton Hill',
+      route: 'Neyyattinkara \u21C4 Kunnukuzhy (Barton Hill)',
+      routeFrom: 'Neyyattinkara',
+      routeTo: 'Kunnukuzhy (Barton Hill)',
+      distanceLimitKm: 30,
+      validFrom: new Date(Date.now() - 60*60*1000).toISOString(),
+      validUntil: new Date(Date.now() + 180*24*60*60*1000).toISOString(),
+      rotationSeed: 'testseed_' + Math.random().toString(36).slice(2, 9),
+    }
+    const { signature } = signPassPayload(mockPayload)
+    const mockPass = { payload: mockPayload, signature }
+    handleScanSuccess(generateStudentQRData(mockPass))
   }
   const testFakePass = () => {
     handleScanSuccess(JSON.stringify({ p: { passId: 'PAS-999999', studentId: 'fake-uid', name: 'Counterfeit User', route: 'Ernakulam ➔ Aluva', validFrom: new Date().toISOString(), validUntil: new Date(Date.now()+ 1e6).toISOString(), rotationSeed: 'fake_seed' }, s: 'invalid_forged_signature_base64', c: 'FAKECD', t: Date.now() }))

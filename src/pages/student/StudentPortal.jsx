@@ -1,9 +1,10 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useAuth } from '../../context/AuthContext'
 import { useData } from '../../context/DataContext'
 import FileUpload from '../../components/FileUpload'
 import { computeDailyCode, generateStudentQRData } from '../../lib/crypto'
 import { QRCodeSVG } from 'qrcode.react'
+import { isConfigured, db, collection, query, where, onSnapshot } from '../../lib/firebase'
 import { 
   CreditCard, 
   Clock, 
@@ -23,17 +24,57 @@ export default function StudentPortal() {
   const { currentUser } = useAuth()
   const { institutions, applications, passes, trips, submitApplication, resubmitApplication } = useData()
 
-  // Find active pass for current student
-  const activePass = useMemo(() => {
-    return passes.find(p => p.studentId === currentUser?.uid)
-  }, [passes, currentUser])
+  // Live Firestore fetch for today's pass — ensures KSRTC approval shows without refresh (even if global DataContext is stale)
+  const [livePass, setLivePass] = useState(null)
+  const [liveApp, setLiveApp] = useState(null)
 
-  // Find latest application for current student (most recently submitted)
+  useEffect(() => {
+    if (!isConfigured || !db || !currentUser?.uid) {
+      setLivePass(null)
+      setLiveApp(null)
+      return
+    }
+    // Direct per-student listeners — bypass global DataContext race and guarantee instant update after admin issuePass
+    const qPass = query(collection(db, 'passes'), where('studentId', '==', currentUser.uid))
+    const unsubPass = onSnapshot(qPass, (snap) => {
+      const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      if (docs.length === 0) {
+        setLivePass(null)
+        return
+      }
+      docs.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+      setLivePass(docs[0])
+    }, (err) => console.warn('StudentPortal livePass sync:', err.message))
+
+    const qApp = query(collection(db, 'applications'), where('studentId', '==', currentUser.uid))
+    const unsubApp = onSnapshot(qApp, (snap) => {
+      const docs = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+      if (docs.length === 0) {
+        setLiveApp(null)
+        return
+      }
+      docs.sort((a, b) => new Date(b.submittedAt || 0) - new Date(a.submittedAt || 0))
+      setLiveApp(docs[0])
+    }, (err) => console.warn('StudentPortal liveApp sync:', err.message))
+
+    return () => {
+      unsubPass()
+      unsubApp()
+    }
+  }, [currentUser?.uid])
+
+  // Prefer live Firestore doc when available, fallback to global DataContext (covers demo mode where isConfigured false)
+  const activePass = useMemo(() => {
+    if (livePass) return livePass
+    return passes.find(p => p.studentId === currentUser?.uid) || null
+  }, [passes, livePass, currentUser])
+
   const currentApp = useMemo(() => {
+    if (liveApp) return liveApp
     const studentApps = applications.filter(a => a.studentId === currentUser?.uid)
     if (studentApps.length === 0) return null
     return studentApps.sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt))[0]
-  }, [applications, currentUser])
+  }, [applications, liveApp, currentUser])
 
   // Form states
   const [isApplying, setIsApplying] = useState(false)
@@ -67,9 +108,21 @@ export default function StudentPortal() {
     return trips.filter(t => t.studentId === currentUser?.uid || (activePass && t.passId === activePass.id))
   }, [trips, currentUser, activePass])
 
-  const todayStr = new Date().toISOString().split('T')[0]
+  // IST date for Kerala — matches rotationSeed daily window
+  const todayStr = useMemo(() => {
+    try { return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) } catch (_e) { return new Date().toISOString().split('T')[0] }
+  }, [])
+  // todayStr is stable per render; recompute trip filter when it changes (midnight IST)
   const todayTrips = useMemo(() => {
-    return studentTrips.filter(t => t.timestamp && t.timestamp.startsWith(todayStr))
+    return studentTrips.filter(t => {
+      if (!t.timestamp) return false
+      try {
+        const tripIST = new Date(t.timestamp).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+        return tripIST === todayStr
+      } catch (_e) {
+        return t.timestamp.startsWith(todayStr)
+      }
+    })
   }, [studentTrips, todayStr])
 
   const distanceUsedToday = todayTrips.reduce((sum, t) => sum + (Number(t.distanceKm) || 0), 0)
