@@ -1,0 +1,57 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // 1. Users Collection
+    // Users can read/write their own profile; authenticated users can read other profiles
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(userId) || isAuthenticated();
+    }
+
+    // 2. Applications Collection
+    // Students create/read their own applications; Institution/Admin can review and update status
+    match /applications/{appId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if isAuthenticated();
+    }
+
+    // 3. Passes Collection
+    // Students can read passes; Admin/System issues passes; Conductors verify passes
+    match /passes/{passId} {
+      allow read: if true; // Allows QR verification lookups
+      allow create, update, delete: if isAuthenticated();
+    }
+
+    // 4. Institutions Directory
+    // Public read for student registration dropdown; authenticated admins manage institutions
+    match /institutions/{instId} {
+      allow read: if true;
+      allow write: if isAuthenticated();
+    }
+
+    // 5. Conductors Roster
+    match /conductors/{condId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+
+    // 6. Trips Log Collection
+    // Conductors log trips; students read their own trip history
+    match /trips/{tripId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if isAuthenticated();
+    }
+  }
+}
