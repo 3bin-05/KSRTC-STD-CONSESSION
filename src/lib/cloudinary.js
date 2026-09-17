@@ -1,10 +1,19 @@
 /**
  * Cloudinary Direct Unsigned Upload Utility
- * Uploads directly to Cloudinary without exposing secret keys in frontend.
+ * Uploads directly to Cloudinary without exposing API secrets in the frontend.
+ * Uses an Unsigned Upload Preset — no server required.
  */
 
-const CLOUD_NAME = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME || 'demo'
-const UPLOAD_PRESET = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET || 'anavandi_unsigned'
+const CLOUD_NAME = import.meta.env.VITE_CLOUDINARY_CLOUD_NAME
+const UPLOAD_PRESET = import.meta.env.VITE_CLOUDINARY_UPLOAD_PRESET
+
+// True when real Cloudinary credentials are present
+const isCloudinaryConfigured = Boolean(
+  CLOUD_NAME &&
+  CLOUD_NAME !== 'demo' &&
+  UPLOAD_PRESET &&
+  UPLOAD_PRESET !== 'anavandi_unsigned'
+)
 
 export async function uploadToCloudinary(file, { onProgress } = {}) {
   if (!file) {
@@ -23,9 +32,9 @@ export async function uploadToCloudinary(file, { onProgress } = {}) {
     throw new Error('File size exceeds the 8MB limit. Please choose a smaller file.')
   }
 
-  // If cloud name is demo or preset not set in real world, simulate upload or try endpoint
-  if (CLOUD_NAME === 'demo' || !UPLOAD_PRESET || UPLOAD_PRESET === 'anavandi_unsigned') {
-    // For demo/offline testing, convert to local object/data URL with realistic progress simulation
+  // Demo / local mode: simulate upload with DataURL so the UI still works offline
+  if (!isCloudinaryConfigured) {
+    console.info('Cloudinary not configured — using local file preview (demo mode).')
     return new Promise((resolve) => {
       let progress = 0
       const interval = setInterval(() => {
@@ -50,6 +59,7 @@ export async function uploadToCloudinary(file, { onProgress } = {}) {
     })
   }
 
+  // Live Cloudinary upload via XHR (supports progress)
   const formData = new FormData()
   formData.append('file', file)
   formData.append('upload_preset', UPLOAD_PRESET)

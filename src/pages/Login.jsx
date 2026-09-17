@@ -14,7 +14,12 @@ export default function Login() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  const { login, registerStudent, loginWithGoogle } = useAuth()
+  const { login, registerStudent, loginWithGoogle, currentUser } = useAuth()
+
+  const roleRedirect = (role) => {
+    const map = { student: '/student', institution: '/institution', conductor: '/conductor', admin: '/admin' }
+    return map[role] || '/student'
+  }
   const { institutions } = useData()
   const navigate = useNavigate()
   const location = useLocation()
@@ -50,11 +55,11 @@ export default function Login() {
           institutionId: chosenInst?.id,
           institutionName: chosenInst?.name,
         })
-        navigate('/student')
+        navigate(roleRedirect(currentUser?.role))
       } else {
         await login(email, password)
-        const from = location.state?.from?.pathname || '/student'
-        navigate(from)
+        const from = location.state?.from?.pathname
+        navigate(from || roleRedirect(currentUser?.role))
       }
     } catch (err) {
       setError(err.message || 'Authentication failed. Please check your credentials.')
@@ -68,7 +73,7 @@ export default function Login() {
     setLoading(true)
     try {
       await loginWithGoogle()
-      navigate('/student')
+      navigate(roleRedirect(currentUser?.role))
     } catch (err) {
       setError(err.message || 'Google sign-in failed.')
     } finally {
