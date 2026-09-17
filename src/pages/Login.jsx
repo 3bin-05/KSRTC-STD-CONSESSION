@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import { useData } from '../context/DataContext'
@@ -14,17 +14,26 @@ export default function Login() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  const { login, registerStudent, loginWithGoogle, currentUser } = useAuth()
-
-  const roleRedirect = (role) => {
-    const map = { student: '/student', institution: '/institution', conductor: '/conductor', admin: '/admin' }
-    return map[role] || '/student'
-  }
+  const { login, registerStudent, loginWithGoogle, currentUser, DEMO_ACCOUNTS, isConfigured } = useAuth()
   const { institutions } = useData()
   const navigate = useNavigate()
   const location = useLocation()
 
   const activeInstitutions = institutions.filter(i => i.active)
+
+  const roleRedirect = (role) => {
+    const map = { student: '/student', institution: '/institution', conductor: '/conductor', admin: '/admin' }
+    return map[role] || '/student'
+  }
+
+  // When currentUser is set (by Firebase listener or demo login), navigate to the correct portal
+  useEffect(() => {
+    if (currentUser) {
+      const from = location.state?.from?.pathname
+      navigate(from || roleRedirect(currentUser.role), { replace: true })
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUser])
 
   const handleSubmit = async (e) => {
     e.preventDefault()
@@ -38,7 +47,7 @@ export default function Login() {
         }
 
         const chosenInst = institutions.find(i => i.id === selectedInstitutionId)
-        
+
         // Domain validation check if institution domain is defined
         if (chosenInst && chosenInst.domain) {
           const userDomain = email.split('@')[1] || ''
@@ -55,11 +64,10 @@ export default function Login() {
           institutionId: chosenInst?.id,
           institutionName: chosenInst?.name,
         })
-        navigate(roleRedirect(currentUser?.role))
+        // Navigation handled by the useEffect above when currentUser updates
       } else {
         await login(email, password)
-        const from = location.state?.from?.pathname
-        navigate(from || roleRedirect(currentUser?.role))
+        // Navigation handled by the useEffect above when currentUser updates
       }
     } catch (err) {
       setError(err.message || 'Authentication failed. Please check your credentials.')
@@ -73,9 +81,22 @@ export default function Login() {
     setLoading(true)
     try {
       await loginWithGoogle()
-      navigate(roleRedirect(currentUser?.role))
+      // Navigation handled by the useEffect above when currentUser updates
     } catch (err) {
       setError(err.message || 'Google sign-in failed.')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  // Quick demo login — only shown when Firebase is not configured
+  const handleDemoLogin = async (demoAccount) => {
+    setError('')
+    setLoading(true)
+    try {
+      await login(demoAccount.email, 'demo')
+    } catch (err) {
+      setError(err.message)
     } finally {
       setLoading(false)
     }
@@ -268,13 +289,40 @@ export default function Login() {
           </div>
         </div>
 
-        <div className="mt-6 text-center text-xs text-[#6B6862] space-y-1">
-          <p>
-            Institution, Conductor & Admin staff are provisioned by Department Admins.
-          </p>
-          <p className="text-[#99958D]">
-            Use the top demo bar to switch roles instantly.
-          </p>
+        {/* Demo Quick-Login — shown only when Firebase is not configured */}
+        {!isConfigured && (
+          <div className="mt-5 p-4 rounded-xl bg-[#FAF8F5] border border-[#E8E4DC]">
+            <p className="text-xs font-semibold text-[#6B6862] mb-2.5 flex items-center gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-[#D97757] inline-block" />
+              Demo Mode — Quick Login
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              {DEMO_ACCOUNTS.map((account) => {
+                const roleLabels = {
+                  student: '🎓 Student',
+                  institution: '🏫 Institution',
+                  conductor: '🚍 Conductor',
+                  admin: '🛡️ Admin',
+                }
+                return (
+                  <button
+                    key={account.uid}
+                    type="button"
+                    onClick={() => handleDemoLogin(account)}
+                    disabled={loading}
+                    className="text-left p-2.5 rounded-lg border border-[#E8E4DC] bg-white hover:border-[#D97757]/40 hover:bg-[#FAF8F5] transition-colors disabled:opacity-50"
+                  >
+                    <p className="text-xs font-semibold text-[#1F1E1D]">{roleLabels[account.role]}</p>
+                    <p className="text-[10px] text-[#6B6862] truncate mt-0.5">{account.displayName}</p>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
+        <div className="mt-4 text-center text-xs text-[#6B6862]">
+          <p>Institution, Conductor & Admin staff are provisioned by Department Admins.</p>
         </div>
       </div>
     </div>
