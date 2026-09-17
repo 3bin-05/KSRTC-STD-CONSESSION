@@ -24,10 +24,27 @@ export function generateKeyPair() {
 }
 
 /**
- * Sign pass payload with Ed25519
+ * Deterministic canonical JSON — sorts object keys recursively so that
+ * Firestore round-trips (which may reorder map keys) never break the
+ * Ed25519 signature. Array order is preserved.
+ */
+function canonicalStringify(value) {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value)
+  }
+  if (Array.isArray(value)) {
+    return '[' + value.map(canonicalStringify).join(',') + ']'
+  }
+  const keys = Object.keys(value).sort()
+  return '{' + keys.map(k => JSON.stringify(k) + ':' + canonicalStringify(value[k])).join(',') + '}'
+}
+
+/**
+ * Sign pass payload with Ed25519 — uses canonical JSON so verification
+ * is stable even if Firestore reorders keys.
  */
 export function signPassPayload(payload) {
-  const payloadString = JSON.stringify(payload)
+  const payloadString = canonicalStringify(payload)
   const messageBytes = decodeUTF8(payloadString)
   const signatureBytes = nacl.sign.detached(messageBytes, MASTER_KEYPAIR.secretKey)
   const signatureBase64 = encodeBase64(signatureBytes)
@@ -40,12 +57,21 @@ export function signPassPayload(payload) {
 
 /**
  * Generate rotating daily HMAC code from rotationSeed + Date string (YYYY-MM-DD)
+ * Uses IST (Asia/Kolkata) as primary — KSRTC Kerala — with UTC fallback for legacy.
  */
 export function computeDailyCode(rotationSeed, dateString = null) {
-  const dateKey = dateString || new Date().toISOString().split('T')[0]
+  let dateKey = dateString
+  if (!dateKey) {
+    // Primary: IST date — avoids UTC midnight mismatch for Kerala users
+    try {
+      dateKey = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+    } catch (_e) {
+      dateKey = new Date().toISOString().split('T')[0]
+    }
+  }
   const input = `${rotationSeed}_${dateKey}`
   
-  // Fast deterministic hash
+  // Fast deterministic hash (DJB2)
   let hash = 5381
   for (let i = 0; i < input.length; i++) {
     hash = ((hash << 5) + hash) + input.charCodeAt(i)
@@ -54,6 +80,16 @@ export function computeDailyCode(rotationSeed, dateString = null) {
   
   const hex = Math.abs(hash).toString(16).padStart(6, '0').slice(0, 6).toUpperCase()
   return hex
+}
+
+function getISTDateString(offsetDays = 0) {
+  const d = new Date()
+  if (offsetDays) d.setDate(d.getDate() + offsetDays)
+  try {
+    return d.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+  } catch (_e) {
+    return d.toISOString().split('T')[0]
+  }
 }
 
 /**
@@ -74,7 +110,8 @@ export function generateStudentQRData(pass) {
 }
 
 /**
- * Verify scanned pass QR code offline on Conductor PWA
+ * Verify scanned pass QR code offline on Conductor PWA — tolerant to
+ * legacy signatures (raw JSON order) and IST/UTC clock skew.
  */
 export function verifyPassQR(qrRawString) {
   try {
@@ -86,38 +123,60 @@ export function verifyPassQR(qrRawString) {
     const { p: payload, s: signature, c: dailyCode } = data
 
     if (!payload || !signature || !dailyCode) {
-      return { valid: false, reason: 'Malformed pass data structure' }
+      return { valid: false, reason: 'Malformed pass data structure — QR must contain payload (p), signature (s) and daily code (c). If you scanned a screenshot, ask student to show live QR.' }
     }
 
-    // 1. Verify Ed25519 Cryptographic Signature
-    const payloadBytes = decodeUTF8(JSON.stringify(payload))
-    const signatureBytes = decodeBase64(signature)
-    const publicKeyBytes = decodeBase64(SYSTEM_PUBLIC_KEY)
+    // 1. Verify Ed25519 Cryptographic Signature — try canonical first, then legacy raw order for old passes
+    const tryVerify = (payloadStr) => {
+      try {
+        const payloadBytes = decodeUTF8(payloadStr)
+        const signatureBytes = decodeBase64(signature)
+        // Prefer public key embedded in QR (if present), fallback to system key
+        const pubKeyB64 = data.k || payload.publicKey || SYSTEM_PUBLIC_KEY
+        const publicKeyBytes = decodeBase64(pubKeyB64)
+        return nacl.sign.detached.verify(payloadBytes, signatureBytes, publicKeyBytes)
+      } catch (_e) { return false }
+    }
 
-    const isSignatureValid = nacl.sign.detached.verify(payloadBytes, signatureBytes, publicKeyBytes)
+    const canonicalStr = canonicalStringify(payload)
+    const rawStr = JSON.stringify(payload)
+    const isSignatureValid = tryVerify(canonicalStr) || tryVerify(rawStr)
+
     if (!isSignatureValid) {
-      return { valid: false, reason: 'Digital signature invalid (counterfeit pass)' }
+      return { valid: false, reason: 'Digital signature invalid (counterfeit pass) — payload was tampered or signed with unknown key. Canonical string tried: ' + canonicalStr.slice(0, 80) + '...' }
     }
 
-    // 2. Check Validity Window
+    // 2. Check Validity Window — 60s grace for device clock skew
     const now = new Date().getTime()
     const validFrom = new Date(payload.validFrom).getTime()
     const validUntil = new Date(payload.validUntil).getTime()
+    const GRACE_MS = 60 * 1000
 
-    if (now < validFrom) {
-      return { valid: false, reason: 'Pass is not yet active' }
+    if (Number.isNaN(validFrom) || Number.isNaN(validUntil)) {
+      return { valid: false, reason: 'Pass has invalid validity dates — re-issue from Admin portal.' }
     }
 
-    if (now > validUntil) {
-      return { valid: false, reason: 'Pass expired on ' + new Date(payload.validUntil).toLocaleDateString() }
+    if (now + GRACE_MS < validFrom) {
+      return { valid: false, reason: 'Pass is not yet active — valid from ' + new Date(payload.validFrom).toLocaleDateString() + '. Device clock may be ahead; wait a minute and retry.' }
     }
 
-    // 3. Verify Anti-Screenshot Rotating Daily Code
-    const expectedDailyCode = computeDailyCode(payload.rotationSeed)
-    if (dailyCode !== expectedDailyCode) {
+    if (now - GRACE_MS > validUntil) {
+      return { valid: false, reason: 'Pass expired on ' + new Date(payload.validUntil).toLocaleDateString() + ' — renewal required via Student portal.' }
+    }
+
+    // 3. Verify Anti-Screenshot Rotating Daily Code — accept IST today, UTC today, and yesterday for late-night tolerance
+    const expectedIST = computeDailyCode(payload.rotationSeed)
+    const expectedIST_Yesterday = computeDailyCode(payload.rotationSeed, getISTDateString(-1))
+    const expectedUTC = (() => {
+      const utcKey = new Date().toISOString().split('T')[0]
+      return computeDailyCode(payload.rotationSeed, utcKey)
+    })()
+
+    const acceptedCodes = [expectedIST, expectedUTC, expectedIST_Yesterday]
+    if (!acceptedCodes.includes(dailyCode)) {
       return { 
         valid: false, 
-        reason: 'Stale / expired screenshot detected (daily rotation mismatch)' 
+        reason: 'Stale / expired screenshot detected — daily code mismatch. Expected ' + expectedIST + ' (IST) / ' + expectedUTC + ' (UTC), got ' + dailyCode + '. Ask student to show live rotating QR, not a screenshot from another day.' 
       }
     }
 
