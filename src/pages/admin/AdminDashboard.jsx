@@ -10,7 +10,8 @@ import {
   CheckCircle2, 
   MapPin, 
   QrCode,
-  Sparkles
+  Sparkles,
+  X
 } from 'lucide-react'
 
 export default function AdminDashboard() {
@@ -20,6 +21,7 @@ export default function AdminDashboard() {
     applications, 
     passes, 
     approveByAdminAndIssuePass, 
+    rejectByAdmin,
     addInstitution, 
     toggleInstitution, 
     addConductor, 
@@ -42,6 +44,8 @@ export default function AdminDashboard() {
 
   const [issuingId, setIssuingId] = useState(null)
   const [successBanner, setSuccessBanner] = useState('')
+  const [selectedAppForAdminReject, setSelectedAppForAdminReject] = useState(null)
+  const [adminRejectionReason, setAdminRejectionReason] = useState('')
 
   const pendingAdminApps = applications.filter(a => a.status === 'pending_admin')
 
@@ -75,11 +79,21 @@ export default function AdminDashboard() {
     setIssuingId(appId)
     try {
       const pass = await approveByAdminAndIssuePass(appId)
-      setSuccessBanner(`Digital Pass ${pass.id} cryptographically signed with Ed25519 and issued successfully!`)
-      setTimeout(() => setSuccessBanner(''), 6000)
+      if (pass) {
+        setSuccessBanner(`Digital Pass ${pass.id} cryptographically signed with Ed25519 and issued successfully!`)
+        setTimeout(() => setSuccessBanner(''), 6000)
+      }
     } finally {
       setIssuingId(null)
     }
+  }
+
+  const handleConfirmAdminReject = async () => {
+    if (!selectedAppForAdminReject) return
+    if (!adminRejectionReason.trim() || adminRejectionReason.trim().length < 4) return
+    await rejectByAdmin(selectedAppForAdminReject.id, adminRejectionReason.trim())
+    setSelectedAppForAdminReject(null)
+    setAdminRejectionReason('')
   }
 
   return (
@@ -207,7 +221,7 @@ export default function AdminDashboard() {
                         <td className="py-3 px-4 font-mono font-semibold text-[#1F1E1D]">
                           {app.distanceLimitKm || 30} km/day
                         </td>
-                        <td className="py-3 px-4 text-right">
+                        <td className="py-3 px-4 text-right space-x-1.5">
                           <button
                             onClick={() => handleIssuePass(app.id)}
                             disabled={issuingId === app.id}
@@ -215,6 +229,13 @@ export default function AdminDashboard() {
                           >
                             <QrCode className="w-3.5 h-3.5" />
                             <span>{issuingId === app.id ? 'Signing Pass...' : 'Issue & Sign Pass'}</span>
+                          </button>
+                          <button
+                            onClick={() => setSelectedAppForAdminReject(app)}
+                            className="px-3 py-1.5 bg-[#FAECE8] text-[#B3492F] hover:bg-[#B3492F] hover:text-white border border-[#B3492F]/30 rounded-md font-semibold text-xs transition-colors inline-flex items-center gap-1"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                            <span>Reject</span>
                           </button>
                         </td>
                       </tr>
@@ -455,6 +476,50 @@ export default function AdminDashboard() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Reject Modal — requires reason, appends to history, status → rejected_by_admin */}
+      {selectedAppForAdminReject && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="anavandi-card bg-white p-6 max-w-md w-full shadow-lg space-y-4">
+            <h3 className="text-base font-bold text-[#B3492F]">
+              Reject Application (KSRTC Admin)
+            </h3>
+            <p className="text-xs text-[#6B6862]">
+              Provide a reason to <strong>{selectedAppForAdminReject.studentName}</strong> ({selectedAppForAdminReject.rollNo}) so they can correct and resubmit.
+            </p>
+
+            <div>
+              <label className="block text-xs font-semibold text-[#1F1E1D] mb-1">
+                Rejection Reason / Notes
+              </label>
+              <textarea
+                rows={3}
+                placeholder="e.g. Route distance exceeds concession slab / Institution approval invalid..."
+                value={adminRejectionReason}
+                onChange={(e) => setAdminRejectionReason(e.target.value)}
+                className="anavandi-input w-full text-xs"
+              />
+              <p className="text-[11px] text-[#6B6862] mt-1">Required — appended to history and shown to student with a Resubmit button.</p>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => { setSelectedAppForAdminReject(null); setAdminRejectionReason('') }}
+                className="anavandi-btn-secondary text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmAdminReject}
+                disabled={!adminRejectionReason.trim() || adminRejectionReason.trim().length < 4}
+                className="anavandi-btn-primary text-xs bg-[#B3492F] hover:bg-[#993e27] disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Confirm Rejection
+              </button>
+            </div>
           </div>
         </div>
       )}

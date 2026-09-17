@@ -54,6 +54,7 @@ export function DataProvider({ children }) {
         photoUrl: 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=400&auto=format&fit=crop&q=80',
         status: 'pending_institution',
         submittedAt: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+        history: [{ status: 'pending_institution', actorId: 'student-demo-uid', timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), note: 'Application submitted' }],
       }
     ]
   })
@@ -158,13 +159,22 @@ export function DataProvider({ children }) {
     localStorage.setItem('anavandi_trips', JSON.stringify(trips))
   }, [trips])
 
+  // Helper: create a history entry
+  const _historyEntry = (status, actorId, note = '') => ({
+    status,
+    actorId,
+    timestamp: new Date().toISOString(),
+    note,
+  })
+
   // --- Student Application Actions ---
   const submitApplication = async (appData) => {
     const newApp = {
+      ...appData,
       id: 'app_' + Date.now(),
       status: 'pending_institution',
       submittedAt: new Date().toISOString(),
-      ...appData,
+      history: [_historyEntry('pending_institution', appData.studentId, 'Application submitted')],
     }
 
     if (isConfigured && db) {
@@ -176,12 +186,13 @@ export function DataProvider({ children }) {
       }
     }
 
-    setApplications(prev => [newApp, ...prev.filter(a => a.studentId !== appData.studentId || a.status === 'rejected')])
+    setApplications(prev => [newApp, ...prev.filter(a => a.studentId !== appData.studentId || a.status === 'rejected_by_institution' || a.status === 'rejected_by_admin' || a.status === 'rejected')])
     return newApp
   }
 
   // --- Institution Actions ---
   const approveByInstitution = async (appId, { distanceLimitKm }) => {
+    const entry = _historyEntry('pending_admin', 'institution', 'Approved by institution')
     const patch = {
       status: 'pending_admin',
       distanceLimitKm: Number(distanceLimitKm) || 30,
@@ -190,7 +201,12 @@ export function DataProvider({ children }) {
 
     if (isConfigured && db) {
       try {
-        await updateDoc(doc(db, 'applications', appId), patch)
+        await updateDoc(doc(db, 'applications', appId), {
+          ...patch,
+          history: applications.find(a => a.id === appId)
+            ? [...(applications.find(a => a.id === appId).history || []), entry]
+            : [entry],
+        })
       } catch (_e) {
         // Fallback if document key is custom or offline
       }
@@ -198,15 +214,16 @@ export function DataProvider({ children }) {
 
     setApplications(prev => prev.map(app => {
       if (app.id === appId) {
-        return { ...app, ...patch }
+        return { ...app, ...patch, history: [...(app.history || []), entry] }
       }
       return app
     }))
   }
 
   const rejectByInstitution = async (appId, reason) => {
+    const entry = _historyEntry('rejected_by_institution', 'institution', reason || 'Enrolment proof verification failed')
     const patch = {
-      status: 'rejected',
+      status: 'rejected_by_institution',
       rejectionReason: reason || 'Enrolment proof verification failed',
       rejectedAt: new Date().toISOString(),
       rejectedBy: 'institution',
@@ -214,7 +231,12 @@ export function DataProvider({ children }) {
 
     if (isConfigured && db) {
       try {
-        await updateDoc(doc(db, 'applications', appId), patch)
+        await updateDoc(doc(db, 'applications', appId), {
+          ...patch,
+          history: applications.find(a => a.id === appId)
+            ? [...(applications.find(a => a.id === appId).history || []), entry]
+            : [entry],
+        })
       } catch (_e) {
         // Fallback
       }
@@ -222,13 +244,43 @@ export function DataProvider({ children }) {
 
     setApplications(prev => prev.map(app => {
       if (app.id === appId) {
-        return { ...app, ...patch }
+        return { ...app, ...patch, history: [...(app.history || []), entry] }
       }
       return app
     }))
   }
 
   // --- Admin Actions ---
+  const rejectByAdmin = async (appId, reason) => {
+    const entry = _historyEntry('rejected_by_admin', 'admin', reason || 'Application does not meet admin criteria')
+    const patch = {
+      status: 'rejected_by_admin',
+      rejectionReason: reason || 'Application does not meet admin criteria',
+      rejectedAt: new Date().toISOString(),
+      rejectedBy: 'admin',
+    }
+
+    if (isConfigured && db) {
+      try {
+        await updateDoc(doc(db, 'applications', appId), {
+          ...patch,
+          history: applications.find(a => a.id === appId)
+            ? [...(applications.find(a => a.id === appId).history || []), entry]
+            : [entry],
+        })
+      } catch (_e) {
+        // Fallback
+      }
+    }
+
+    setApplications(prev => prev.map(app => {
+      if (app.id === appId) {
+        return { ...app, ...patch, history: [...(app.history || []), entry] }
+      }
+      return app
+    }))
+  }
+
   const approveByAdminAndIssuePass = async (appId) => {
     const app = applications.find(a => a.id === appId)
     if (!app) return
@@ -266,6 +318,8 @@ export function DataProvider({ children }) {
       createdAt: new Date().toISOString(),
     }
 
+    const approvalEntry = _historyEntry('approved', 'admin', `Pass ${newPass.id} issued`)
+
     if (isConfigured && db) {
       try {
         await setDoc(doc(db, 'passes', newPass.id), newPass)
@@ -273,6 +327,7 @@ export function DataProvider({ children }) {
           status: 'approved',
           passId: newPass.id,
           adminApprovedAt: new Date().toISOString(),
+          history: [...(app.history || []), approvalEntry],
         })
       } catch (e) {
         console.warn('Error saving pass to Firestore:', e)
@@ -280,9 +335,46 @@ export function DataProvider({ children }) {
     }
 
     // Update Application Status in state
-    setApplications(prev => prev.map(a => a.id === appId ? { ...a, status: 'approved', passId: newPass.id } : a))
+    setApplications(prev => prev.map(a => a.id === appId ? { ...a, status: 'approved', passId: newPass.id, history: [...(a.history || []), approvalEntry] } : a))
     setPasses(prev => [newPass, ...prev.filter(p => p.studentId !== app.studentId)])
     return newPass
+  }
+
+  // --- Resubmission: create fresh app from rejected one ---
+  const resubmitApplication = async (rejectedAppId, updatedData = {}) => {
+    const rejected = applications.find(a => a.id === rejectedAppId)
+    if (!rejected) return null
+
+    const newApp = {
+      id: 'app_' + Date.now(),
+      studentId: rejected.studentId,
+      studentName: updatedData.studentName || rejected.studentName,
+      studentEmail: updatedData.studentEmail || rejected.studentEmail,
+      rollNo: updatedData.rollNo || rejected.rollNo,
+      institutionId: updatedData.institutionId || rejected.institutionId,
+      institutionName: updatedData.institutionName || rejected.institutionName,
+      routeFrom: updatedData.routeFrom || rejected.routeFrom,
+      routeTo: updatedData.routeTo || rejected.routeTo,
+      distanceKm: updatedData.distanceKm || rejected.distanceKm,
+      proofUrl: updatedData.proofUrl || rejected.proofUrl,
+      photoUrl: updatedData.photoUrl || rejected.photoUrl,
+      status: 'pending_institution',
+      submittedAt: new Date().toISOString(),
+      previousApplicationId: rejectedAppId,
+      history: [_historyEntry('pending_institution', rejected.studentId, `Resubmitted from ${rejectedAppId}`)],
+    }
+
+    if (isConfigured && db) {
+      try {
+        const docRef = await addDoc(collection(db, 'applications'), newApp)
+        newApp.id = docRef.id
+      } catch (e) {
+        console.warn('Error resubmitting application to Firestore:', e)
+      }
+    }
+
+    setApplications(prev => [newApp, ...prev])
+    return newApp
   }
 
   const addInstitution = async (instData) => {
@@ -390,7 +482,9 @@ export function DataProvider({ children }) {
         submitApplication,
         approveByInstitution,
         rejectByInstitution,
+        rejectByAdmin,
         approveByAdminAndIssuePass,
+        resubmitApplication,
         addInstitution,
         toggleInstitution,
         addConductor,

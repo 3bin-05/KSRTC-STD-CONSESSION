@@ -54,7 +54,8 @@ export default function InstitutionDashboard() {
 
   const handleConfirmRejection = async () => {
     if (!selectedAppForRejection) return
-    await rejectByInstitution(selectedAppForRejection.id, rejectionReason)
+    if (!rejectionReason.trim() || rejectionReason.trim().length < 4) return
+    await rejectByInstitution(selectedAppForRejection.id, rejectionReason.trim())
     setSelectedAppForRejection(null)
     setRejectionReason('')
   }
@@ -204,11 +205,11 @@ export default function InstitutionDashboard() {
                       <span className={`px-2 py-0.5 rounded text-[11px] font-medium ${
                         app.status === 'approved' 
                           ? 'bg-[#EFF5ED] text-[#4F7942]' 
-                          : app.status === 'rejected'
+                          : app.status === 'rejected_by_institution' || app.status === 'rejected_by_admin' || app.status === 'rejected'
                           ? 'bg-[#FAECE8] text-[#B3492F]'
                           : 'bg-[#FEF7EB] text-[#C97D1A]'
                       }`}>
-                        {app.status === 'pending_admin' ? 'Sent to KSRTC Admin' : app.status}
+                        {app.status === 'pending_admin' ? 'Sent to KSRTC Admin' : app.status === 'rejected_by_institution' ? 'Rejected by Institution' : app.status === 'rejected_by_admin' ? 'Rejected by Admin' : app.status}
                       </span>
                     </td>
                     <td className="py-2.5 px-4 font-mono">{app.distanceLimitKm || '-'} km</td>
@@ -288,18 +289,20 @@ export default function InstitutionDashboard() {
                 onChange={(e) => setRejectionReason(e.target.value)}
                 className="anavandi-input w-full text-xs"
               />
+              <p className="text-[11px] text-[#6B6862] mt-1">Required — appended to history and shown to student with a Resubmit button.</p>
             </div>
 
             <div className="flex justify-end gap-2 pt-2">
               <button
-                onClick={() => setSelectedAppForRejection(null)}
+                onClick={() => { setSelectedAppForRejection(null); setRejectionReason('') }}
                 className="anavandi-btn-secondary text-xs"
               >
                 Cancel
               </button>
               <button
                 onClick={handleConfirmRejection}
-                className="anavandi-btn-primary text-xs bg-[#B3492F] hover:bg-[#993e27]"
+                disabled={!rejectionReason.trim() || rejectionReason.trim().length < 4}
+                className="anavandi-btn-primary text-xs bg-[#B3492F] hover:bg-[#993e27] disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 Confirm Rejection
               </button>

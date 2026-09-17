@@ -11,6 +11,42 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    // --- Application lifecycle helpers (Phase 3-6 state machine) ---
+    function isValidStatus(s) {
+      return s in ['pending_institution', 'pending_admin', 'approved', 'rejected_by_institution', 'rejected_by_admin'];
+    }
+
+    // Legacy 'rejected' is treated as rejected_by_institution for migration
+    function isValidTransition(oldS, newS) {
+      return (oldS == 'pending_institution' && newS in ['pending_admin', 'rejected_by_institution'])
+          || (oldS == 'pending_admin' && newS in ['approved', 'rejected_by_admin'])
+          || (oldS == 'rejected' && newS in ['rejected_by_institution', 'rejected_by_admin']);
+    }
+
+    function hasValidHistoryOnCreate() {
+      return request.resource.data.keys().hasAll(['history'])
+          && request.resource.data.history is list
+          && request.resource.data.history.size() >= 1
+          && request.resource.data.history[0].status == 'pending_institution'
+          && request.resource.data.history[0].keys().hasAll(['status', 'actorId', 'timestamp']);
+    }
+
+    function historyAppended() {
+      return request.resource.data.history is list
+          && resource.data.history is list
+          && request.resource.data.history.size() > resource.data.history.size()
+          && request.resource.data.history[request.resource.data.history.size() - 1].status == request.resource.data.status;
+    }
+
+    function rejectionRequiresReason() {
+      return !(request.resource.data.status in ['rejected_by_institution', 'rejected_by_admin'])
+          || (
+            request.resource.data.keys().hasAll(['rejectionReason'])
+            && request.resource.data.rejectionReason is string
+            && request.resource.data.rejectionReason.size() > 3
+          );
+    }
+
     // 1. Users Collection
     // Users can read/write their own profile; authenticated users can read other profiles
     match /users/{userId} {
@@ -18,18 +54,39 @@ service cloud.firestore {
       allow write: if isOwner(userId) || isAuthenticated();
     }
 
-    // 2. Applications Collection
-    // Students create/read their own applications; Institution/Admin can review and update status
+    // 2. Applications Collection — single state machine backing the lifecycle
+    //   pending_institution → pending_admin → approved
+    //   pending_institution → rejected_by_institution
+    //   pending_admin → rejected_by_admin
+    // Every state change appends { status, actorId, timestamp, note } to `history`.
+    // Resubmission creates a fresh doc with previousApplicationId linking to the rejected one.
     match /applications/{appId} {
       allow read: if isAuthenticated();
-      allow create: if isAuthenticated();
-      allow update, delete: if isAuthenticated();
+
+      // Create: must start at pending_institution with a valid history entry.
+      // Resubmission is a create with previousApplicationId pointing to the rejected doc.
+      allow create: if isAuthenticated()
+          && request.resource.data.status == 'pending_institution'
+          && isValidStatus(request.resource.data.status)
+          && hasValidHistoryOnCreate()
+          && rejectionRequiresReason();
+
+      // Update: only valid transitions, history must be appended, rejected statuses require reason.
+      // distanceLimitKm is required when moving to pending_admin; passId when moving to approved is optional at rule level (enforced in app logic via issuePass).
+      allow update: if isAuthenticated()
+          && isValidStatus(request.resource.data.status)
+          && isValidTransition(resource.data.status, request.resource.data.status)
+          && historyAppended()
+          && rejectionRequiresReason();
+
+      allow delete: if isAuthenticated();
     }
 
     // 3. Passes Collection
-    // Students can read passes; Admin/System issues passes; Conductors verify passes
+    // Students can read passes; Admin/System issues passes via issuePass() → setDoc(passes/{passId}) + update applications/{id} to approved
+    // QR uses Phase 6 rotationSeed + HMAC dailyCode — no separate scheme.
     match /passes/{passId} {
-      allow read: if true; // Allows QR verification lookups
+      allow read: if true; // Allows QR verification lookups (conductor offline verify uses publicKey + signature)
       allow create, update, delete: if isAuthenticated();
     }
 

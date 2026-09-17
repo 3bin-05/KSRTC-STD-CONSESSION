@@ -21,16 +21,18 @@ import {
 
 export default function StudentPortal() {
   const { currentUser } = useAuth()
-  const { institutions, applications, passes, trips, submitApplication } = useData()
+  const { institutions, applications, passes, trips, submitApplication, resubmitApplication } = useData()
 
   // Find active pass for current student
   const activePass = useMemo(() => {
     return passes.find(p => p.studentId === currentUser?.uid)
   }, [passes, currentUser])
 
-  // Find current application
+  // Find latest application for current student (most recently submitted)
   const currentApp = useMemo(() => {
-    return applications.find(a => a.studentId === currentUser?.uid)
+    const studentApps = applications.filter(a => a.studentId === currentUser?.uid)
+    if (studentApps.length === 0) return null
+    return studentApps.sort((a, b) => new Date(b.submittedAt) - new Date(a.submittedAt))[0]
   }, [applications, currentUser])
 
   // Form states
@@ -50,6 +52,7 @@ export default function StudentPortal() {
   })
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [resubmittingFrom, setResubmittingFrom] = useState(null)
 
   // Calculate renewal window: if validity expires in <= 14 days
   const isRenewalDue = useMemo(() => {
@@ -85,7 +88,7 @@ export default function StudentPortal() {
     setSubmitting(true)
     try {
       const chosenInst = institutions.find(i => i.id === formData.institutionId)
-      await submitApplication({
+      const appPayload = {
         studentId: currentUser.uid,
         studentName: formData.studentName,
         studentEmail: currentUser.email,
@@ -97,7 +100,14 @@ export default function StudentPortal() {
         distanceKm: Number(formData.distanceKm) || 25,
         proofUrl: formData.proofUrl,
         photoUrl: formData.photoUrl,
-      })
+      }
+
+      if (resubmittingFrom) {
+        await resubmitApplication(resubmittingFrom, appPayload)
+        setResubmittingFrom(null)
+      } else {
+        await submitApplication(appPayload)
+      }
       setIsApplying(false)
     } catch (err) {
       setError(err.message || 'Failed to submit application')
@@ -123,6 +133,22 @@ export default function StudentPortal() {
     setIsApplying(true)
   }
 
+  const handleResubmit = (app) => {
+    setResubmittingFrom(app.id)
+    setFormData({
+      studentName: app.studentName || '',
+      studentEmail: app.studentEmail || currentUser?.email || '',
+      rollNo: app.rollNo || '',
+      institutionId: app.institutionId || institutions[0]?.id || '',
+      routeFrom: app.routeFrom || 'Neyyattinkara',
+      routeTo: app.routeTo || 'Kunnukuzhy',
+      distanceKm: app.distanceKm || 28,
+      proofUrl: app.proofUrl || '',
+      photoUrl: app.photoUrl || currentUser?.photoUrl || 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=400&auto=format&fit=crop&q=80',
+    })
+    setIsApplying(true)
+  }
+
   // Application Stage Progress component
   const renderProgressIndicator = (status) => {
     const stages = [
@@ -134,7 +160,9 @@ export default function StudentPortal() {
     let activeIdx = 0
     if (status === 'pending_admin') activeIdx = 1
     if (status === 'approved') activeIdx = 2
-    if (status === 'rejected') activeIdx = -1
+    const isRejected = status === 'rejected_by_institution' || status === 'rejected_by_admin' || status === 'rejected'
+
+    const rejectedByLabel = status === 'rejected_by_institution' || status === 'rejected' ? 'Institution' : 'KSRTC Admin'
 
     return (
       <div className="anavandi-card p-6 bg-white mb-8">
@@ -146,27 +174,27 @@ export default function StudentPortal() {
           <span className={`text-xs px-2.5 py-0.5 rounded-full font-medium ${
             status === 'approved'
               ? 'bg-[#EFF5ED] text-[#4F7942]'
-              : status === 'rejected'
+              : isRejected
               ? 'bg-[#FAECE8] text-[#B3492F]'
               : 'bg-[#FEF7EB] text-[#C97D1A]'
           }`}>
-            {status === 'approved' ? 'Approved & Issued' : status === 'rejected' ? 'Application Rejected' : 'Under Review'}
+            {status === 'approved' ? 'Approved & Issued' : isRejected ? `Rejected by ${rejectedByLabel}` : 'Under Review'}
           </span>
         </div>
 
-        {status === 'rejected' ? (
+        {isRejected ? (
           <div className="p-4 rounded-xl bg-[#FAECE8] border border-[#B3492F]/20 text-[#B3492F] space-y-1">
             <p className="font-semibold text-xs flex items-center gap-1.5">
-              <XCircle className="w-4 h-4" /> Application Returned / Rejected
+              <XCircle className="w-4 h-4" /> Application Rejected by {rejectedByLabel}
             </p>
             <p className="text-xs text-[#1F1E1D]">
-              Reason: {currentApp?.rejectionReason || 'Institutional proof did not meet the criteria. Please resubmit with updated documents.'}
+              Reason: {currentApp?.rejectionReason || 'Application did not meet the criteria. Please resubmit with updated details.'}
             </p>
             <button
-              onClick={() => setIsApplying(true)}
+              onClick={() => handleResubmit(currentApp)}
               className="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-[#B3492F] hover:underline"
             >
-              Update and Resubmit Application →
+              Resubmit Application →
             </button>
           </div>
         ) : (
@@ -250,7 +278,7 @@ export default function StudentPortal() {
           </div>
           {currentApp && (
             <button
-              onClick={() => setIsApplying(false)}
+              onClick={() => { setIsApplying(false); setResubmittingFrom(null) }}
               className="text-xs text-[#6B6862] hover:text-[#1F1E1D]"
             >
               Cancel
@@ -379,7 +407,7 @@ export default function StudentPortal() {
               {currentApp && (
                 <button
                   type="button"
-                  onClick={() => setIsApplying(false)}
+                  onClick={() => { setIsApplying(false); setResubmittingFrom(null) }}
                   className="anavandi-btn-secondary text-sm"
                 >
                   Cancel
@@ -404,7 +432,7 @@ export default function StudentPortal() {
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       {/* Progress Timeline if pending or rejected */}
-      {currentApp && currentApp.status !== 'approved' && (
+      {currentApp && currentApp.status !== 'approved' && !isApplying && (
         renderProgressIndicator(currentApp.status)
       )}
 
